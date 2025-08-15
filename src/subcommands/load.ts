@@ -1,9 +1,6 @@
 import { makeTitledPrettyError, type SimpleLogger, text } from "@lmstudio/lms-common";
 import { terminalSize } from "@lmstudio/lms-isomorphic";
-import {
-  type DownloadedModel,
-  type LLMLlamaAccelerationOffloadRatio,
-} from "@lmstudio/lms-shared-types";
+import { type LLMLlamaAccelerationOffloadRatio, type ModelInfo } from "@lmstudio/lms-shared-types";
 import { type LLMLoadModelConfig, type LMStudioClient } from "@lmstudio/sdk";
 import chalk from "chalk";
 import { boolean, command, flag, option, optional, positional, string, type Type } from "cmd-ts";
@@ -52,6 +49,13 @@ export const load = command({
       `,
       displayName: "path",
     }),
+    ttl: option({
+      type: optional(refinedNumber({ integer: true, min: 1 })),
+      long: "ttl",
+      description: text`
+        TTL (seconds): If provided, when the model is not used for this number of seconds, it will be unloaded.
+      `,
+    }),
     gpu: option({
       type: optional(gpuOptionType),
       long: "gpu",
@@ -99,15 +103,13 @@ export const load = command({
     }),
   },
   handler: async args => {
-    const { gpu, contextLength, yes, exact, identifier } = args;
+    const { ttl: ttlSeconds, gpu, contextLength, yes, exact, identifier } = args;
     const loadConfig: LLMLoadModelConfig = {
       contextLength,
     };
     if (gpu !== undefined) {
-      loadConfig.gpuOffload = {
+      loadConfig.gpu = {
         ratio: gpu,
-        mainGpu: 0,
-        tensorSplit: [],
       };
     }
     let { path } = args;
@@ -169,7 +171,7 @@ export const load = command({
         );
         process.exit(1);
       }
-      await loadModel(logger, client, model, identifier, loadConfig);
+      await loadModel(logger, client, model, identifier, loadConfig, ttlSeconds);
       return;
     }
 
@@ -178,7 +180,7 @@ export const load = command({
     const initialFilteredModels = fuzzy.filter(path ?? "", modelPaths);
     logger.debug("Initial filtered models length:", initialFilteredModels.length);
 
-    let model: DownloadedModel;
+    let model: ModelInfo;
     if (yes) {
       if (initialFilteredModels.length === 0) {
         logger.errorWithoutPrefix(
@@ -248,12 +250,12 @@ export const load = command({
       draft.lastLoadedModels = lastLoadedModels.slice(0, 20);
     });
 
-    await loadModel(logger, client, model, identifier, loadConfig);
+    await loadModel(logger, client, model, identifier, loadConfig, ttlSeconds);
   },
 });
 
 async function selectModelToLoad(
-  models: DownloadedModel[],
+  models: ModelInfo[],
   modelPaths: string[],
   initialSearch: string,
   leaveEmptyLines: number,
@@ -299,9 +301,10 @@ async function selectModelToLoad(
 async function loadModel(
   logger: SimpleLogger,
   client: LMStudioClient,
-  model: DownloadedModel,
+  model: ModelInfo,
   identifier: string | undefined,
   config: LLMLoadModelConfig,
+  ttlSeconds: number | undefined,
 ) {
   const { path, sizeBytes } = model;
   logger.info(`Loading model "${path}"...`);
@@ -319,6 +322,7 @@ async function loadModel(
   process.addListener("SIGINT", sigintListener);
   const llmModel = await (model.type === "llm" ? client.llm : client.embedding).load(path, {
     verbose: false,
+    ttl: ttlSeconds,
     onProgress: progress => {
       progressBar.setRatio(progress);
     },

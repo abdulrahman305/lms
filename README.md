@@ -46,3 +46,29 @@ Here are some frequently used commands:
   - `lms unload --all` - To unload all models
 - `lms create` - To create a new project with LM Studio SDK
 - `lms log stream` - To stream logs from LM Studio
+
+# Contributing
+
+The CLI is part of the [lmstudio.js monorepo](https://github.com/lmstudio-ai/lmstudio.js) and cannot be built standalone.
+
+## Building and Testing the CLI
+
+```bash
+# Clone and build the entire monorepo
+git clone https://github.com/lmstudio-ai/lmstudio-js.git --recursive
+cd lmstudio-js
+npm install
+npm run build
+
+# Test your CLI changes
+node publish/cli/dist/index.js <subcommand>
+```
+
+**Example:**
+
+```bash
+node publish/cli/dist/index.js --help
+node publish/cli/dist/index.js status
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for more information.

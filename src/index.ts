@@ -1,13 +1,16 @@
 import { run, subcommands } from "cmd-ts";
 import { bootstrap } from "./subcommands/bootstrap.js";
+import { chat } from "./subcommands/chat.js";
+import { clone } from "./subcommands/clone.js";
 import { create } from "./subcommands/create.js";
 import { dev } from "./subcommands/dev.js";
+import { flagsCommand } from "./subcommands/flags.js";
 import { get } from "./subcommands/get.js";
 import { importCmd } from "./subcommands/importCmd.js";
 import { ls, ps } from "./subcommands/list.js";
 import { load } from "./subcommands/load.js";
 import { log } from "./subcommands/log.js";
-import { pull } from "./subcommands/pull.js";
+import { login } from "./subcommands/login.js";
 import { push } from "./subcommands/push.js";
 import { server } from "./subcommands/server.js";
 import { status } from "./subcommands/status.js";
@@ -23,6 +26,7 @@ if (process.argv.length === 2) {
 const cli = subcommands({
   name: "lms",
   cmds: {
+    chat,
     status,
     server,
     ls,
@@ -32,14 +36,12 @@ const cli = subcommands({
     unload,
     create,
     log,
-    ...(process.env.LMS_DEV
-      ? {
-          dev,
-          push,
-          pull,
-        }
-      : {}),
+    dev,
+    push,
+    clone,
+    login,
     import: importCmd,
+    flags: flagsCommand,
     bootstrap,
     version,
   },

@@ -1,10 +1,9 @@
 import { text } from "@lmstudio/lms-common";
-import { kebabCaseRegex } from "@lmstudio/lms-shared-types";
+import { kebabCaseRegex, kebabCaseWithDotsRegex } from "@lmstudio/lms-shared-types";
 import { command, positional, string, type Type } from "cmd-ts";
 import { resolve } from "path";
 import { createClient, createClientArgs } from "../createClient.js";
 import { createDownloadPbUpdater } from "../downloadPbUpdater.js";
-import { ensureAuthenticated } from "../ensureAuthenticated.js";
 import { exists } from "../exists.js";
 import { createLogger, logLevelArgs } from "../logLevel.js";
 import { optionalPositional } from "../optionalPositional.js";
@@ -21,16 +20,16 @@ const artifactIdentifierType: Type<string, { owner: string; name: string }> = {
     if (!kebabCaseRegex.test(owner)) {
       throw new Error("Invalid owner. Must be kebab-case.");
     }
-    if (!kebabCaseRegex.test(name)) {
-      throw new Error("Invalid name. Must be kebab-case.");
+    if (!kebabCaseWithDotsRegex.test(name)) {
+      throw new Error("Invalid name. Must be kebab-case (dots allowed).");
     }
     return { owner, name };
   },
 };
 
-export const pull = command({
-  name: "pull",
-  description: "Pull an artifact from LM Studio Hub to a local folder.",
+export const clone = command({
+  name: "clone",
+  description: "Clone an artifact from LM Studio Hub to a local folder.",
   args: {
     artifactIdentifier: positional({
       displayName: "artifact-identifier",
@@ -40,8 +39,8 @@ export const pull = command({
     path: optionalPositional({
       displayName: "path",
       description: text`
-        The path to the folder to pull the resources into. If not provided, defaults to a new folder
-        with the artifact name in the current working directory.
+        The path to the folder to clone the resources into. If not provided, defaults to a new
+        folder with the artifact name in the current working directory.
       `,
       type: string,
       default: "",
@@ -52,7 +51,6 @@ export const pull = command({
   handler: async args => {
     const logger = createLogger(args);
     const client = await createClient(logger, args);
-    await ensureAuthenticated(client, logger);
     const { owner, name } = args.artifactIdentifier;
     let path = args.path;
     let autoNamed: boolean;
@@ -87,6 +85,6 @@ export const pull = command({
         logger.info("Finalizing download...");
       },
     });
-    logger.info(`Artifact successfully pulled to ${path}.`);
+    logger.info(`Artifact successfully cloned to ${path}.`);
   },
 });

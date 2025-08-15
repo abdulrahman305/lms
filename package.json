@@ -1,6 +1,6 @@
 {
   "name": "@lmstudio/lms-cli",
-  "version": "0.3.28",
+  "version": "0.3.43",
   "description": "LM Studio CLI",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -9,18 +9,22 @@
   "scripts": {
     "build": "tsc",
     "watch": "tsc -w",
-    "clean": "shx rm -rf ./dist && shx rm -f ./tsconfig.tsbuildinfo",
+    "clean": "shx rm -rf ./dist ./tsconfig.tsbuildinfo",
     "postinstall": "patch-package"
+  },
+  "engines": {
+    "node": "^20.12.2",
+    "npm": ">=8"
   },
   "author": "LM Studio <team@lmstudio.ai> (https://lmstudio.ai)",
   "license": "Apache-2.0",
   "dependencies": {
-    "@lmstudio/lms-common": "^0.7.4",
-    "@lmstudio/lms-common-server": "^0.2.4",
-    "@lmstudio/lms-es-plugin-runner": "^0.0.6",
-    "@lmstudio/lms-isomorphic": "^0.4.2",
-    "@lmstudio/lms-lmstudio": "^0.0.18",
-    "@lmstudio/sdk": "^0.4.3",
+    "@lmstudio/lms-common": "^0.8.9",
+    "@lmstudio/lms-common-server": "^0.2.18",
+    "@lmstudio/lms-es-plugin-runner": "^0.0.20",
+    "@lmstudio/lms-isomorphic": "^0.4.6",
+    "@lmstudio/lms-lmstudio": "^0.0.32",
+    "@lmstudio/sdk": "^1.5.0",
     "boxen": "^5.1.2",
     "chalk": "^4.1.2",
     "cmd-ts": "^0.13.0",
@@ -30,6 +34,7 @@
     "inquirer": "^8.2.6",
     "inquirer-autocomplete-prompt": "^2.0.1",
     "tar": "^7.0.1",
+    "yaml": "^2.7.1",
     "zod": "^3.22.4"
   },
   "devDependencies": {
@@ -48,5 +53,5 @@
     "shx": "^0.3.4",
     "typescript": "^5.3.3"
   },
-  "gitHead": "89cc39afdfc9e66602788edb678acc4993b6d5a6"
+  "gitHead": "d95ce2feb067b4eec446c673155631ee1734e982"
 }
