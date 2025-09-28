@@ -1,8 +1,12 @@
 import { Command, InvalidArgumentError, Option } from "@commander-js/extra-typings";
 import { makeTitledPrettyError, type SimpleLogger, text } from "@lmstudio/lms-common";
 import { terminalSize } from "@lmstudio/lms-isomorphic";
-import { type LLMLlamaAccelerationOffloadRatio, type ModelInfo } from "@lmstudio/lms-shared-types";
-import { type LLMLoadModelConfig, type LMStudioClient } from "@lmstudio/sdk";
+import { type ModelInfo } from "@lmstudio/lms-shared-types";
+import {
+  type EstimatedResourcesUsage,
+  type LLMLoadModelConfig,
+  type LMStudioClient,
+} from "@lmstudio/sdk";
 import chalk from "chalk";
 import fuzzy from "fuzzy";
 import inquirer from "inquirer";
@@ -15,7 +19,7 @@ import { addLogLevelOptions, createLogger } from "../logLevel.js";
 import { ProgressBar } from "../ProgressBar.js";
 import { createRefinedNumberParser } from "../types/refinedNumber.js";
 
-const gpuOptionParser = (str: string): LLMLlamaAccelerationOffloadRatio => {
+const gpuOptionParser = (str: string): number => {
   str = str.trim().toLowerCase();
   if (str === "off") {
     return 0;
@@ -93,10 +97,24 @@ export const load = addLogLevelOptions(
           models matching the path, the first one will be loaded. Fails if the path provided does not
           match any model.
         `,
+      )
+      .option(
+        "--estimate-only",
+        text`
+          Calculate an estimate of the resources required to load the model. Does not load the model.
+        `,
       ),
   ),
 ).action(async (pathArg, options) => {
-  const { ttl: ttlSeconds, gpu, contextLength, yes = false, exact = false, identifier } = options;
+  const {
+    ttl: ttlSeconds,
+    gpu,
+    contextLength,
+    yes = false,
+    exact = false,
+    identifier,
+    estimateOnly,
+  } = options;
   const loadConfig: LLMLoadModelConfig = {
     contextLength,
   };
@@ -130,8 +148,8 @@ export const load = addLogLevelOptions(
         makeTitledPrettyError(
           "Path not provided",
           text`
-            The parameter ${chalk.cyanBright("[path]")} is required when using the
-            ${chalk.yellowBright("--exact")} flag.
+            The parameter ${chalk.cyan("[path]")} is required when using the
+            ${chalk.yellow("--exact")} flag.
           `,
         ).message,
       );
@@ -148,13 +166,13 @@ export const load = addLogLevelOptions(
         makeTitledPrettyError(
           "Model not found",
           text`
-            No model found with path being exactly "${chalk.yellowBright(path)}".
+            No model found with path being exactly "${chalk.yellow(path)}".
 
-            To disable exact matching, remove the ${chalk.yellowBright("--exact")} flag.
+            To disable exact matching, remove the ${chalk.yellow("--exact")} flag.
 
             To see a list of all downloaded models, run:
 
-                ${chalk.yellowBright("lms ls --detailed")}
+                ${chalk.yellow("lms ls")}
 
             Note, you need to provide the full model path. For example:
 
@@ -164,6 +182,15 @@ export const load = addLogLevelOptions(
       );
       process.exit(1);
     }
+
+    if (estimateOnly === true) {
+      const estimate = await (
+        model.type === "llm" ? client.llm : client.embedding
+      ).estimateResourcesUsage(model.path, loadConfig);
+      printEstimatedResourceUsage(model, loadConfig.contextLength, gpu, estimate, logger);
+      return;
+    }
+
     await loadModel(logger, client, model, identifier, loadConfig, ttlSeconds);
     return;
   }
@@ -180,13 +207,13 @@ export const load = addLogLevelOptions(
         makeTitledPrettyError(
           "Model not found",
           text`
-            No model found that matches path "${chalk.yellowBright(path)}".
+            No model found that matches path "${chalk.yellow(path)}".
 
             To see a list of all downloaded models, run:
 
-                ${chalk.yellowBright("lms ls --detailed")}
+                ${chalk.yellow("lms ls")}
 
-            To select a model interactively, remove the ${chalk.yellowBright("--yes")} flag:
+            To select a model interactively, remove the ${chalk.yellow("--yes")} flag:
 
                 lms load
           `,
@@ -206,8 +233,8 @@ export const load = addLogLevelOptions(
       model = await selectModelToLoad(models, modelPaths, "", 4, lastLoadedMap);
     } else if (initialFilteredModels.length === 0) {
       console.info(
-        chalk.redBright(text`
-          ! Cannot find a model matching the provided path (${chalk.yellowBright(path)}). Please
+        chalk.red(text`
+          ! Cannot find a model matching the provided path (${chalk.yellow(path)}). Please
           select one from the list below.
         `),
       );
@@ -229,6 +256,14 @@ export const load = addLogLevelOptions(
       );
       model = await selectModelToLoad(models, modelPaths, path ?? "", 5, lastLoadedMap);
     }
+  }
+
+  if (estimateOnly === true) {
+    const estimate = await (
+      model.type === "llm" ? client.llm : client.embedding
+    ).estimateResourcesUsage(model.path, loadConfig);
+    printEstimatedResourceUsage(model, loadConfig.contextLength, gpu, estimate, logger);
+    return;
   }
 
   const modelInLastLoadedModelsIndex = lastLoadedModels.indexOf(model.path);
@@ -262,7 +297,7 @@ async function selectModelToLoad(
   const { selected } = await prompt({
     type: "autocomplete",
     name: "selected",
-    message: chalk.greenBright("Select a model to load") + chalk.gray(" |"),
+    message: chalk.green("Select a model to load") + chalk.gray(" |"),
     initialSearch,
     loop: false,
     pageSize: terminalSize().rows - leaveEmptyLines,
@@ -277,7 +312,7 @@ async function selectModelToLoad(
         const displayName =
           option.string + " " + chalk.gray(`(${formatSizeBytes1000(model.sizeBytes)})`);
         // if (lastLoadedMap.has(model.path)) {
-        //   displayName = chalk.yellowBright("[Recent] ") + displayName;
+        //   displayName = chalk.yellow("[Recent] ") + displayName;
         // }
         return {
           value: model,
@@ -331,11 +366,44 @@ async function loadModel(
   `);
   const info = await llmModel.getModelInfo();
   logger.info(text`
-    To use the model in the API/SDK, use the identifier "${chalk.greenBright(info!.identifier)}".
+    To use the model in the API/SDK, use the identifier "${chalk.green(info!.identifier)}".
   `);
   if (identifier === undefined) {
     logger.info(text`
-      To set a custom identifier, use the ${chalk.yellowBright("--identifier <identifier>")} option.
+      To set a custom identifier, use the ${chalk.yellow("--identifier <identifier>")} option.
     `);
   }
+}
+
+function printEstimatedResourceUsage(
+  model: ModelInfo,
+  contextLength: number | undefined,
+  gpuOffloadRatio: number | undefined,
+  estimate: EstimatedResourcesUsage,
+  logger: SimpleLogger,
+) {
+  const colorFunc = estimate.passesGuardrails === true ? chalk.green : chalk.yellow;
+  logger.info(`Model: ${model.path}`);
+  if (contextLength !== undefined) {
+    logger.info(`Context Length: ${contextLength.toLocaleString()}`);
+  }
+  if (gpuOffloadRatio !== undefined) {
+    logger.info(`GPU Offload: ${gpuOffloadRatio * 100}%`);
+  }
+  logger.info(
+    `Estimated GPU Memory:   ${colorFunc(formatSizeBytes1000(estimate.memory.totalVramBytes))}`,
+  );
+  logger.info(
+    `Estimated Total Memory: ${colorFunc(formatSizeBytes1000(estimate.memory.totalBytes))}`,
+  );
+
+  if (estimate.memory.confidence === "low") {
+    logger.info(`Confidence: ${chalk.yellow(estimate.memory.confidence.toUpperCase())}`);
+  }
+  const message =
+    estimate.passesGuardrails === true
+      ? "This model may be loaded based on your resource guardrails settings."
+      : "This model will fail to load based on your resource guardrails settings.";
+
+  logger.info("\nEstimate: " + colorFunc(message));
 }

@@ -13,9 +13,9 @@ function loadedCheck(count: number) {
   if (count === 0) {
     return "";
   } else if (count === 1) {
-    return chalk.greenBright("✓ LOADED");
+    return chalk.green("✓ LOADED");
   } else {
-    return chalk.greenBright(`✓ LOADED (${count})`);
+    return chalk.green(`✓ LOADED (${count})`);
   }
 }
 
@@ -82,16 +82,23 @@ export const ls = addCreateClientOptions(
       .description("List all downloaded models")
       .option("--llm", "Show only LLM models")
       .option("--embedding", "Show only embedding models")
+      .option("--detailed", "[Deprecated] Show detailed view with grouping")
       .option("--json", "Outputs in JSON format to stdout"),
   ),
 ).action(async options => {
   const logger = createLogger(options);
   const client = await createClient(logger, options);
 
-  const { llm = false, embedding = false, json = false } = options;
+  const { llm = false, embedding = false, detailed = false, json = false } = options;
 
   let downloadedModels = await client.system.listDownloadedModels();
   const loadedModels = await client.llm.listLoaded();
+
+  if (detailed) {
+    logger.warn(
+      chalk.yellow("The '--detailed' flag is deprecated. Output is the same as 'lms ls'"),
+    );
+  }
 
   const originalModelsCount = downloadedModels.length;
 
@@ -115,12 +122,10 @@ export const ls = addCreateClientOptions(
 
   if (afterFilteringModelsCount === 0) {
     if (originalModelsCount === 0) {
-      console.info(chalk.redBright("You have not downloaded any models yet."));
+      console.info(chalk.red("You have not downloaded any models yet."));
     } else {
       console.info(
-        chalk.redBright(
-          `You have ${originalModelsCount} models, but none of them match the filter.`,
-        ),
+        chalk.red(`You have ${originalModelsCount} models, but none of them match the filter.`),
       );
     }
     return;
@@ -170,17 +175,19 @@ export const ps = addCreateClientOptions(
   ];
 
   if (json) {
-    console.info(
-      JSON.stringify(
-        await Promise.all(
-          loadedModels.map(async model => {
-            const info = await model.getModelInfo();
-            const { instanceReference: _, ...filteredInfo } = info;
-            return filteredInfo;
-          }),
-        ),
-      ),
+    const modelInfos = await Promise.all(
+      loadedModels.map(async model => {
+        const info = await model.getModelInfo();
+        const { instanceReference: _, ...filteredInfo } = info;
+        const instanceProcessingState = await model.getInstanceProcessingState();
+        return {
+          ...filteredInfo,
+          status: instanceProcessingState.status,
+          queued: instanceProcessingState.queued,
+        };
+      }),
     );
+    console.info(JSON.stringify(modelInfos));
     return;
   }
 

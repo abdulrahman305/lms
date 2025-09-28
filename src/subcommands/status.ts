@@ -1,7 +1,12 @@
 import { Command } from "@commander-js/extra-typings";
 import { text } from "@lmstudio/lms-common";
 import chalk from "chalk";
-import { addCreateClientOptions, checkHttpServer, createClient } from "../createClient.js";
+import {
+  addCreateClientOptions,
+  checkHttpServer,
+  createClient,
+  DEFAULT_SERVER_PORT,
+} from "../createClient.js";
 import { formatSizeBytes1000 } from "../formatSizeBytes1000.js";
 import { addLogLevelOptions, createLogger } from "../logLevel.js";
 import { getServerConfig } from "./server.js";
@@ -19,20 +24,20 @@ export const status = addLogLevelOptions(
   if (port === undefined) {
     if (host === "127.0.0.1") {
       try {
-        port = (await getServerConfig(logger)).port;
+        port = (await getServerConfig(logger))?.port ?? DEFAULT_SERVER_PORT;
       } catch (e) {
         logger.debug(`Failed to read last status`, e);
-        port = 1234;
+        port = DEFAULT_SERVER_PORT;
       }
     } else {
-      port = 1234;
+      port = DEFAULT_SERVER_PORT;
     }
   }
   const running = await checkHttpServer(logger, port, host);
   let content = "";
   if (running) {
     content += text`
-      Server: ${chalk.greenBright("ON")} (port: ${port})
+      Server: ${chalk.green("ON")} (port: ${port})
     `;
     content += "\n\n";
 
@@ -56,7 +61,7 @@ export const status = addLogLevelOptions(
     }
   } else {
     content += text`
-      Server: ${chalk.redBright(" OFF ")}
+      Server: ${chalk.red(" OFF ")}
 
       ${chalk.gray("(i) To start the server, run the following command:")}
 

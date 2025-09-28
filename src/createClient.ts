@@ -9,6 +9,9 @@ import { exists } from "./exists.js";
 import { appInstallLocationFilePath, lmsKey2Path } from "./lmstudioPaths.js";
 import { type LogLevelArgs } from "./logLevel.js";
 import { createRefinedNumberParser } from "./types/refinedNumber.js";
+
+export const DEFAULT_SERVER_PORT: number = 1234;
+
 /**
  * Checks if the HTTP server is running.
  */
@@ -47,6 +50,12 @@ interface AppInstallLocation {
 
 /**
  * Adds create client options to a commander.js command
+ *
+ * This creates an Options Group. If other options are added without defining their own group,
+ * then they will be (likely erroneously) added to the this group.
+ * To avoid this, developers should either:
+ *   1. Define an options group before adding subsequent options
+ *   2. Add all options _before_ adding this group
  */
 export function addCreateClientOptions<
   Args extends any[],
@@ -54,6 +63,7 @@ export function addCreateClientOptions<
   GlobalOpts extends OptionValues,
 >(command: Command<Args, Opts, GlobalOpts>) {
   return command
+    .optionsGroup("Instance Options:")
     .option(
       "--host <host>",
       text`
@@ -68,7 +78,7 @@ export function addCreateClientOptions<
         "--port <port>",
         text`
           The port where LM Studio can be reached. If not provided and the host is set to "127.0.0.1"
-          (default), the last used port will be used; otherwise, 1234 will be used.
+          (default), the last used port will be used; otherwise, ${DEFAULT_SERVER_PORT} will be used.
         `,
       ).argParser(createRefinedNumberParser({ integer: true, min: 0, max: 65535 })),
     );
@@ -153,9 +163,7 @@ export async function createClient(
     logger.error("Host should not include the protocol.");
     process.exit(1);
   } else if (host.includes(":")) {
-    logger.error(
-      `Host should not include the port number. Use ${chalk.yellowBright("--port")} instead.`,
-    );
+    logger.error(`Host should not include the port number. Use ${chalk.yellow("--port")} instead.`);
     process.exit(1);
   }
   let auth: LMStudioClientConstructorOpts;
@@ -237,7 +245,7 @@ export async function createClient(
   }
 
   if (port === undefined) {
-    port = 1234;
+    port = DEFAULT_SERVER_PORT;
   }
 
   logger.debug(`Connecting to server at ${host}:${port}`);
