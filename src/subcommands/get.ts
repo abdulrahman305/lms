@@ -1,9 +1,11 @@
-import { Command, Option } from "@commander-js/extra-typings";
+import { Command, Option, type OptionValues } from "@commander-js/extra-typings";
+import { search, select } from "@inquirer/prompts";
 import { type SimpleLogger, text } from "@lmstudio/lms-common";
 import { terminalSize } from "@lmstudio/lms-isomorphic";
 import {
   type ArtifactDownloadPlan,
   type ArtifactDownloadPlanModelInfo,
+  type HubModel,
   kebabCaseRegex,
   kebabCaseWithDotsRegex,
   type ModelCompatibilityType,
@@ -15,80 +17,103 @@ import {
 } from "@lmstudio/sdk";
 import chalk from "chalk";
 import fuzzy from "fuzzy";
-import inquirer from "inquirer";
-import inquirerPrompt from "inquirer-autocomplete-prompt";
 import { askQuestion } from "../confirm.js";
-import { addCreateClientOptions, createClient } from "../createClient.js";
+import { addCreateClientOptions, createClient, type CreateClientArgs } from "../createClient.js";
 import { createDownloadPbUpdater } from "../downloadPbUpdater.js";
 import { formatSizeBytes1000, formatSizeBytesWithColor1000 } from "../formatSizeBytes1000.js";
 import { handleDownloadWithProgressBar } from "../handleDownloadWithProgressBar.js";
-import { addLogLevelOptions, createLogger } from "../logLevel.js";
+import { addLogLevelOptions, createLogger, type LogLevelArgs } from "../logLevel.js";
 import { ProgressBar } from "../ProgressBar.js";
+import { runPromptWithExitHandling } from "../prompt.js";
 import { createRefinedNumberParser } from "../types/refinedNumber.js";
 
-export const get = addLogLevelOptions(
-  addCreateClientOptions(
-    new Command()
-      .name("get")
-      .description("Searching and downloading a model from online.")
-      .argument(
-        "[modelName]",
-        text`
-          The model to download. If not provided, staff picked models will be shown. For models that
-          have multiple quantizations, you can specify the quantization by appending it with "@". For
-          example, use "llama-3.1-8b@q4_k_m" to download the llama-3.1-8b model with the specified
-          quantization.
-        `,
-      )
-      .option(
-        "--mlx",
-        text`
-          Whether to include MLX models in the search results. If any of "--mlx" or "--gguf" flag is
-          specified, only models that match the specified flags will be shown; Otherwise only models
-          supported by your installed LM Runtimes will be shown.
-        `,
-      )
-      .option(
-        "--gguf",
-        text`
-          Whether to include GGUF models in the search results. If any of "--mlx" or "--gguf" flag
-          is specified, only models that match the specified flags will be shown; Otherwise only
-          models supported by your installed LM Runtimes will be shown.
-        `,
-      )
-      .addOption(
-        new Option("-n, --limit <value>", "Limit the number of model options.").argParser(
-          createRefinedNumberParser({ integer: true, min: 1 }),
-        ),
-      )
-      .option(
-        "--always-show-all-results",
-        text`
-          By default, an exact model match to the query is automatically selected. If this flag is
-          specified, you're prompted to choose from the model results, even when there's an exact
-          match.
-        `,
-      )
-      .option(
-        "-a, --always-show-download-options",
-        text`
-          By default, if there an exact match for your query, the system will automatically select a
-          quantization based on your hardware. Specifying this flag will always prompt you to choose
-          a download option.
-        `,
-      )
-      .option(
-        "-y, --yes",
-        text`
-          Suppress all confirmations and warnings. Useful for scripting. If there are multiple
-          models matching the search term, the first one will be used. If there are multiple download
-          options, the recommended one based on your hardware will be chosen. Fails if you have
-          specified a quantization via the "@" syntax and the quantization does not exist in the
-          options.
-        `,
-      ),
-  ),
-).action(async (modelName, options) => {
+type GetCommandOptions = OptionValues &
+  CreateClientArgs &
+  LogLevelArgs & {
+    mlx?: boolean;
+    gguf?: boolean;
+    limit?: number;
+    alwaysShowAllResults?: boolean;
+    alwaysShowDownloadOptions?: boolean;
+    yes?: boolean;
+  };
+
+type SearchResultItem =
+  | {
+      kind: "staffPick";
+      model: HubModel;
+      isExactMatch: boolean;
+      displayName: string;
+    }
+  | {
+      kind: "hf";
+      model: ModelSearchResultEntry;
+    };
+
+const getCommand = new Command<[], GetCommandOptions>()
+  .name("get")
+  .description(text`Search and download local models`)
+  .argument(
+    "[modelName]",
+    text`
+      The model to download. If not provided, staff picked models will be shown. For models that
+      have multiple quantizations, you can specify the quantization by appending it with "@". For
+      example, use "llama-3.1-8b@q4_k_m" to download the llama-3.1-8b model with the specified
+      quantization.
+    `,
+  )
+  .option(
+    "--mlx",
+    text`
+      Whether to include MLX models in the search results. If any of "--mlx" or "--gguf" flag is
+      specified, only models that match the specified flags will be shown; Otherwise only models
+      supported by your installed LM Runtimes will be shown.
+    `,
+  )
+  .option(
+    "--gguf",
+    text`
+      Whether to include GGUF models in the search results. If any of "--mlx" or "--gguf" flag
+      is specified, only models that match the specified flags will be shown; Otherwise only
+      models supported by your installed LM Runtimes will be shown.
+    `,
+  )
+  .addOption(
+    new Option("-n, --limit <value>", "Limit the number of model options.").argParser(
+      createRefinedNumberParser({ integer: true, min: 1 }),
+    ),
+  )
+  .option(
+    "--always-show-all-results",
+    text`
+      By default, an exact model match to the query is automatically selected. If this flag is
+      specified, you're prompted to choose from the model results, even when there's an exact
+      match.
+    `,
+  )
+  .option(
+    "-a, --always-show-download-options",
+    text`
+      By default, if there an exact match for your query, the system will automatically select a
+      quantization based on your hardware. Specifying this flag will always prompt you to choose
+      a download option.
+    `,
+  )
+  .option(
+    "-y, --yes",
+    text`
+      Automatically approve all prompts. Useful for scripting. If there are multiple
+      models matching the search term, the first one will be used. If there are multiple download
+      options, the recommended one based on your hardware will be chosen. Fails if you have
+      specified a quantization via the "@" syntax and the quantization does not exist in the
+      options.
+    `,
+  );
+
+addCreateClientOptions(getCommand);
+addLogLevelOptions(getCommand);
+
+getCommand.action(async (modelName, options: GetCommandOptions) => {
   const {
     mlx = false,
     gguf = false,
@@ -98,11 +123,11 @@ export const get = addLogLevelOptions(
     yes = false,
   } = options;
   const logger = createLogger(options);
-  if (yes && alwaysShowAllResults) {
+  if (yes === true && alwaysShowAllResults === true) {
     logger.error("You cannot use the --yes flag with the --always-show-all-results flag.");
     process.exit(1);
   }
-  if (yes && alwaysShowDownloadOptions) {
+  if (yes === true && alwaysShowDownloadOptions === true) {
     logger.error("You cannot use the --yes flag with the --always-show-download-options flag.");
     process.exit(1);
   }
@@ -191,32 +216,83 @@ export const get = addLogLevelOptions(
     limit,
   };
   logger.debug("Searching for models with options", opts);
-  const results = await client.repository.searchModels(opts);
-  logger.debug(`Found ${results.length} result(s)`);
+  const hfResults = await client.repository.searchModels(opts);
+  logger.debug(`Found ${hfResults.length} HF result(s)`);
 
-  if (results.length === 0) {
+  const normalizedSearchTerm = searchTerm?.toLowerCase().trim() ?? "";
+
+  let staffPickResults: Array<SearchResultItem> = [];
+  try {
+    const modelCatalogModels = await client.repository.unstable.getModelCatalog();
+    staffPickResults = modelCatalogModels
+      .filter(model => {
+        if (compatibilityTypes === undefined) {
+          return true;
+        }
+        return model.metadata.compatibilityTypes.some(type => compatibilityTypes!.includes(type));
+      })
+      .filter(model => {
+        if (normalizedSearchTerm === "") {
+          return true;
+        }
+        const fullName = `${model.owner}/${model.name}`.toLowerCase();
+        return (
+          fullName.includes(normalizedSearchTerm) ||
+          model.name.toLowerCase().includes(normalizedSearchTerm)
+        );
+      })
+      .map(model => ({
+        kind: "staffPick" as const,
+        model,
+        isExactMatch:
+          normalizedSearchTerm !== "" &&
+          (model.name.toLowerCase() === normalizedSearchTerm ||
+            `${model.owner}/${model.name}`.toLowerCase() === normalizedSearchTerm),
+        displayName: `${model.owner}/${model.name}`,
+      }));
+    logger.debug(`Found ${staffPickResults.length} staff pick result(s)`);
+  } catch (error) {
+    logger.warn("Failed to load staff picks, continuing with HF search only.", error);
+  }
+
+  const combinedResults: Array<SearchResultItem> = [
+    ...staffPickResults,
+    ...hfResults.map(result => ({ kind: "hf" as const, model: result })),
+  ];
+
+  if (combinedResults.length === 0) {
     logger.error("No models found with the specified search criteria.");
     process.exit(1);
   }
 
-  const exactMatchIndex = results.findIndex(result => result.isExactMatch());
+  const exactMatchIndex = combinedResults.findIndex(result => {
+    return result.kind === "hf" ? result.model.isExactMatch() : result.isExactMatch;
+  });
   const hasExactMatch = exactMatchIndex !== -1;
-  let model: ModelSearchResultEntry;
+  let result: SearchResultItem;
   if (hasExactMatch && !alwaysShowAllResults) {
     logger.debug("Automatically selecting an exact match model at index", exactMatchIndex);
-    model = results[exactMatchIndex];
+    result = combinedResults[exactMatchIndex];
   } else {
     if (yes) {
       logger.info("Multiple models found. Automatically selecting the first one due to --yes.");
-      model = results[0];
+      result = combinedResults[0];
     } else {
       logger.debug("Prompting user to choose a model");
-      logger.info("No exact match found. Please choose a model from the list below.");
+      if (!hasExactMatch && searchTerm !== undefined) {
+        logger.info("No exact match found. Please choose a model from the list below.");
+      }
       logger.infoWithoutPrefix();
-      model = await askToChooseModel(results, 2);
+      result = await askToChooseModel(combinedResults, 2);
     }
   }
-  const downloadOptions = await model.getDownloadOptions();
+  if (result.kind === "staffPick") {
+    const { owner, name } = result.model;
+    await downloadArtifact(client, logger, owner, name, yes);
+    return;
+  }
+
+  const downloadOptions = await result.model.getDownloadOptions();
   if (downloadOptions.length === 0) {
     logger.error("No compatible download options available for this model.");
     process.exit(1);
@@ -374,99 +450,103 @@ export const get = addLogLevelOptions(
 });
 
 async function askToChooseModel(
-  models: Array<ModelSearchResultEntry>,
+  models: Array<SearchResultItem>,
   additionalRowsToReserve = 0,
-): Promise<ModelSearchResultEntry> {
-  const prompt = inquirer.createPromptModule({ output: process.stderr });
-  prompt.registerPrompt("autocomplete", inquirerPrompt);
-  console.info(
-    chalk.gray("! Use the arrow keys to navigate, type to filter, and press enter to select."),
+): Promise<SearchResultItem> {
+  const modelNames = models.map(model =>
+    model.kind === "hf" ? model.model.name : model.displayName,
   );
-  console.info();
-  const modelNames = models.map(model => model.name);
-  const answers = await prompt([
-    {
-      type: "autocomplete",
-      name: "model",
-      message: "Select a model to download",
-      loop: false,
-      pageSize: terminalSize().rows - 4 - additionalRowsToReserve,
-      emptyText: "No model matched the filter",
-      source: async (_: any, input: string) => {
-        const options = fuzzy.filter(input ?? "", modelNames, {
-          pre: "\x1b[91m",
-          post: "\x1b[39m",
-        });
-        return options.map(option => {
-          const model = models[option.index];
-          let name: string = "";
-          if (model.isStaffPick()) {
-            name += "[Staff Pick] ";
-          }
-          if (model.isExactMatch()) {
-            name += chalk.yellow("[Exact Match] ");
-          }
-          name += option.string;
-          return {
-            name,
-            value: model,
-            short: option.original,
-          };
-        });
+  const pageSize = terminalSize().rows - 4 - additionalRowsToReserve;
+  return await runPromptWithExitHandling(() =>
+    search<SearchResultItem>(
+      {
+        message: "Select a model to download",
+        pageSize,
+        source: async (term: string | undefined, { signal }: { signal: AbortSignal }) => {
+          void signal;
+          const searchTerm = term ?? "";
+          const options = fuzzy.filter(searchTerm, modelNames, {
+            pre: "\x1b[91m",
+            post: "\x1b[39m",
+          });
+          return options.map(option => {
+            const model = models[option.index];
+            let name: string = "";
+            const isExact =
+              model.kind === "staffPick" ? model.isExactMatch : model.model.isExactMatch();
+            if (isExact) {
+              name += chalk.yellow("[Exact Match] ");
+            }
+            name += option.string;
+            if (model.kind === "staffPick" && model.model.description !== undefined) {
+              const truncated =
+                model.model.description.length > 80
+                  ? `${model.model.description.slice(0, 55)}...`
+                  : model.model.description;
+              name += chalk.dim(` — ${truncated}`);
+            }
+            return {
+              name,
+              value: model,
+              short: option.original,
+            };
+          });
+        },
       },
-    },
-  ]);
-  return answers.model;
+      { output: process.stderr },
+    ),
+  );
 }
 async function askToChooseDownloadOption(
   downloadOptions: Array<ModelSearchResultDownloadOption>,
   defaultIndex: number,
   additionalRowsToReserve = 0,
 ): Promise<ModelSearchResultDownloadOption> {
-  const prompt = inquirer.createPromptModule({ output: process.stderr });
   console.info(chalk.gray("! Use the arrow keys to navigate, and press enter to select."));
-  console.info();
-  const answers = await prompt([
-    {
-      type: "list",
-      name: "option",
-      default: defaultIndex,
-      message: chalk.green("Select an option to download"),
-      loop: false,
-      pageSize: terminalSize().rows - 4 - additionalRowsToReserve,
-      choices: downloadOptions.map(option => {
-        let name = "";
-        if (option.quantization !== undefined && option.quantization !== "") {
-          name += `${option.quantization} `.padEnd(9);
-        }
-        name += `${formatSizeBytes1000(option.sizeBytes)} `.padStart(11);
-        name += chalk.gray(option.name) + " ";
-        switch (option.fitEstimation) {
-          case "willNotFit":
-            name += chalk.red("[Likely too large for this machine]");
-            break;
-          case "fitWithoutGPU":
-            name += chalk.green("[Likely fit]");
-            break;
-          case "partialGPUOffload":
-            name += chalk.yellow("[Partial GPU offload possible]");
-            break;
-          case "fullGPUOffload":
-            name += chalk.green("[Full GPU offload possible]");
-            break;
-        }
-        if (option.isRecommended()) {
-          name += " " + chalk.green(" Recommended ");
-        }
-        return {
-          name,
-          value: option,
-          short: formatOptionShortName(option),
-        };
-      }),
-    },
-  ]);
-  return answers.option;
+
+  const pageSize = terminalSize().rows - 4 - additionalRowsToReserve;
+  const choiceDefault = downloadOptions[defaultIndex] ?? downloadOptions[0];
+  return await runPromptWithExitHandling(() =>
+    select<ModelSearchResultDownloadOption>(
+      {
+        message: chalk.green("Select an option to download"),
+        loop: false,
+        pageSize,
+        default: choiceDefault,
+        choices: downloadOptions.map(option => {
+          let name = "";
+          if (option.quantization !== undefined && option.quantization !== "") {
+            name += `${option.quantization} `.padEnd(9);
+          }
+          name += `${formatSizeBytes1000(option.sizeBytes)} `.padStart(11);
+          name += chalk.gray(option.name) + " ";
+          switch (option.fitEstimation) {
+            case "willNotFit":
+              name += chalk.red("[Likely too large for this machine]");
+              break;
+            case "fitWithoutGPU":
+              name += chalk.green("[Likely fit]");
+              break;
+            case "partialGPUOffload":
+              name += chalk.yellow("[Partial GPU offload possible]");
+              break;
+            case "fullGPUOffload":
+              name += chalk.green("[Full GPU offload possible]");
+              break;
+          }
+          if (option.isRecommended()) {
+            name += " " + chalk.green(" Recommended ");
+          }
+          return {
+            name,
+            value: option,
+            short: formatOptionShortName(option),
+          };
+        }),
+      },
+      { output: process.stderr },
+    ),
+  );
 }
 
 function formatOptionShortName(option: ModelSearchResultDownloadOption) {
@@ -616,7 +696,6 @@ export async function downloadArtifact(
   name: string,
   yes: boolean,
 ) {
-  console.info();
   let downloadPlan: ArtifactDownloadPlan = {
     nodes: [
       {
@@ -715,3 +794,5 @@ export async function downloadArtifact(
     return await downloadPlanner.download(opts);
   });
 }
+
+export const get = getCommand;

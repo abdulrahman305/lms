@@ -1,34 +1,41 @@
-import { Command } from "@commander-js/extra-typings";
+import { Command, type OptionValues } from "@commander-js/extra-typings";
+import { search } from "@inquirer/prompts";
 import { makeTitledPrettyError, text } from "@lmstudio/lms-common";
 import { terminalSize } from "@lmstudio/lms-isomorphic";
 import chalk from "chalk";
 import fuzzy from "fuzzy";
-import inquirer from "inquirer";
-import inquirerPrompt from "inquirer-autocomplete-prompt";
-import { addCreateClientOptions, createClient } from "../createClient.js";
-import { addLogLevelOptions, createLogger } from "../logLevel.js";
+import { addCreateClientOptions, createClient, type CreateClientArgs } from "../createClient.js";
+import { addLogLevelOptions, createLogger, type LogLevelArgs } from "../logLevel.js";
+import { runPromptWithExitHandling } from "../prompt.js";
 
-export const unload = addLogLevelOptions(
-  addCreateClientOptions(
-    new Command()
-      .name("unload")
-      .description("Unload a model")
-      .argument(
-        "[identifier]",
-        text`
-          The identifier of the model to unload. If not provided and exactly one model is loaded, it
-          will be unloaded automatically. Otherwise, you will be prompted to select a model
-          interactively from a list.
-        `,
-      )
-      .option("-a, --all", "Unload all models"),
-  ),
-).action(async (identifier, options) => {
-  const { all } = options;
+type UnloadCommandOptions = OptionValues &
+  CreateClientArgs &
+  LogLevelArgs & {
+    all?: boolean;
+  };
+
+const unloadCommand = new Command<[], UnloadCommandOptions>()
+  .name("unload")
+  .description("Unload a model")
+  .argument(
+    "[identifier]",
+    text`
+      The identifier of the model to unload. If not provided and exactly one model is loaded, it
+      will be unloaded automatically. Otherwise, you will be prompted to select a model
+      interactively from a list.
+    `,
+  )
+  .option("-a, --all", "Unload all models");
+
+addCreateClientOptions(unloadCommand);
+addLogLevelOptions(unloadCommand);
+
+unloadCommand.action(async (identifier, options: UnloadCommandOptions) => {
+  const unloadAll = options.all === true;
   const logger = createLogger(options);
   const client = await createClient(logger, options);
 
-  if (all && identifier !== undefined) {
+  if (unloadAll === true && identifier !== undefined) {
     logger.errorWithoutPrefix(
       makeTitledPrettyError(
         "Invalid Usage",
@@ -55,7 +62,7 @@ export const unload = addLogLevelOptions(
     return `${identifier} ?(${path})`;
   });
 
-  if (all) {
+  if (unloadAll === true) {
     if (models.length === 0) {
       logger.info("No models to unload.");
     } else {
@@ -91,7 +98,7 @@ export const unload = addLogLevelOptions(
     logger.info(`Model "${identifier}" unloaded.`);
   } else {
     if (models.length === 0) {
-      logger.error(`You don't have any models loaded. Use "lms load" to load a model.`);
+      logger.info(`You don't have any models loaded. Use "lms load" to load a model.`);
       process.exit(1);
     }
     // If there is exactly one model loaded, unload it automatically without prompting.
@@ -102,44 +109,42 @@ export const unload = addLogLevelOptions(
       logger.info(`Model "${model.identifier}" unloaded.`);
       return;
     }
-    console.info();
-    console.info(
-      chalk.gray("! Use the arrow keys to navigate, type to filter, and press enter to select."),
-    );
     console.info(chalk.gray("! To unload all models, use the --all flag."));
     console.info();
-    const prompt = inquirer.createPromptModule({ output: process.stderr });
-    prompt.registerPrompt("autocomplete", inquirerPrompt);
-    const { selected } = await prompt({
-      type: "autocomplete",
-      name: "selected",
-      message: chalk.green("Select a model to unload") + chalk.gray(" |"),
-      initialSearch: "",
-      loop: false,
-      pageSize: terminalSize().rows - 5,
-      emptyText: "No loaded model matched the filter",
-      source: async (_: any, input: string) => {
-        input = input.split("?").join(""); // Strip the question mark to prevent issues
-        const options = fuzzy.filter(input ?? "", modelSearchStrings, {
-          pre: "\x1b[91m",
-          post: "\x1b[39m",
-        });
-        return options.map(option => {
-          const model = models[option.index];
-          const questionMarkIndex = option.string.lastIndexOf("?");
-          const displayName =
-            option.string.slice(0, questionMarkIndex) +
-            chalk.gray(option.string.slice(questionMarkIndex + 1));
-          return {
-            value: model,
-            short: models[option.index].identifier,
-            name: displayName,
-          };
-        });
-      },
-    } as any);
+    const pageSize = terminalSize().rows - 5;
+    const selected = await runPromptWithExitHandling(() =>
+      search<(typeof models)[number]>(
+        {
+          message: chalk.green("Select a model to unload") + chalk.gray(" |"),
+          pageSize,
+          source: async (input: string | undefined, { signal }: { signal: AbortSignal }) => {
+            void signal;
+            const sanitizedInput = (input ?? "").split("?").join("");
+            const options = fuzzy.filter(sanitizedInput, modelSearchStrings, {
+              pre: "\x1b[91m",
+              post: "\x1b[39m",
+            });
+            return options.map(option => {
+              const model = models[option.index];
+              const questionMarkIndex = option.string.lastIndexOf("?");
+              const displayName =
+                option.string.slice(0, questionMarkIndex) +
+                chalk.gray(option.string.slice(questionMarkIndex + 1));
+              return {
+                value: model,
+                short: models[option.index].identifier,
+                name: displayName,
+              };
+            });
+          },
+        },
+        { output: process.stderr },
+      ),
+    );
     logger.debug(`Unloading "${selected}"...`);
     await client.llm.unload(selected.identifier);
     logger.info(`Model "${selected.identifier}" unloaded.`);
   }
 });
+
+export const unload = unloadCommand;

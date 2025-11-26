@@ -1,4 +1,10 @@
-import { Command, InvalidArgumentError, Option } from "@commander-js/extra-typings";
+import {
+  Command,
+  InvalidArgumentError,
+  Option,
+  type OptionValues,
+} from "@commander-js/extra-typings";
+import { search } from "@inquirer/prompts";
 import { makeTitledPrettyError, type SimpleLogger, text } from "@lmstudio/lms-common";
 import { terminalSize } from "@lmstudio/lms-isomorphic";
 import { type ModelInfo } from "@lmstudio/lms-shared-types";
@@ -9,14 +15,13 @@ import {
 } from "@lmstudio/sdk";
 import chalk from "chalk";
 import fuzzy from "fuzzy";
-import inquirer from "inquirer";
-import inquirerPrompt from "inquirer-autocomplete-prompt";
 import { getCliPref } from "../cliPref.js";
-import { addCreateClientOptions, createClient } from "../createClient.js";
+import { addCreateClientOptions, createClient, type CreateClientArgs } from "../createClient.js";
 import { formatElapsedTime } from "../formatElapsedTime.js";
 import { formatSizeBytes1000 } from "../formatSizeBytes1000.js";
-import { addLogLevelOptions, createLogger } from "../logLevel.js";
+import { addLogLevelOptions, createLogger, type LogLevelArgs } from "../logLevel.js";
 import { ProgressBar } from "../ProgressBar.js";
+import { runPromptWithExitHandling } from "../prompt.js";
 import { createRefinedNumberParser } from "../types/refinedNumber.js";
 
 const gpuOptionParser = (str: string): number => {
@@ -36,76 +41,87 @@ const gpuOptionParser = (str: string): number => {
   return num;
 };
 
-export const load = addLogLevelOptions(
-  addCreateClientOptions(
-    new Command()
-      .name("load")
-      .description("Load a model")
-      .argument(
-        "[path]",
-        text`
-          The path of the model to load. If not provided, you will be prompted to select one. If
-          multiple models match the path, you will also be prompted to select one. If you don't wish
-          to be prompted, please use the --exact or the --yes flag.
-        `,
-      )
-      .addOption(
-        new Option(
-          "--ttl <seconds>",
-          text`
-            TTL: If provided, when the model is not used for this number of seconds, it will be unloaded.
-          `,
-        ).argParser(createRefinedNumberParser({ integer: true, min: 1 })),
-      )
-      .addOption(
-        new Option(
-          "--gpu <offload-ratio>",
-          text`
-            How much to offload to the GPU. If "off", GPU offloading is disabled. If "max", all layers
-            are offloaded to GPU. If a number between 0 and 1, that fraction of layers will be offloaded
-            to the GPU. By default, LM Studio will decide how much to offload to the GPU.
-          `,
-        ).argParser(gpuOptionParser),
-      )
-      .addOption(
-        new Option(
-          "--context-length <length>",
-          text`
-            The number of tokens to consider as context when generating text. If not provided, the
-            default value will be used.
-          `,
-        ).argParser(createRefinedNumberParser({ integer: true, min: 1 })),
-      )
-      .option(
-        "--exact",
-        text`
-          Only load the model if the path provided matches the model exactly. Fails if the path
-          provided does not match any model.
-        `,
-      )
-      .option(
-        "--identifier <identifier>",
-        text`
-          The identifier to assign to the loaded model. The identifier can be used to refer to the
-          model in the API.
-        `,
-      )
-      .option(
-        "-y, --yes",
-        text`
-          Suppress all confirmations and warnings. Useful for scripting. If there are multiple
-          models matching the path, the first one will be loaded. Fails if the path provided does not
-          match any model.
-        `,
-      )
-      .option(
-        "--estimate-only",
-        text`
-          Calculate an estimate of the resources required to load the model. Does not load the model.
-        `,
-      ),
-  ),
-).action(async (pathArg, options) => {
+type LoadCommandOptions = OptionValues &
+  CreateClientArgs &
+  LogLevelArgs & {
+    ttl?: number;
+    gpu?: number;
+    contextLength?: number;
+    exact?: boolean;
+    identifier?: string;
+    yes?: boolean;
+    estimateOnly?: boolean;
+  };
+
+const loadCommand = new Command<[], LoadCommandOptions>()
+  .name("load")
+  .description("Load a model")
+  .argument(
+    "[path]",
+    text`
+      The path of the model to load. If not provided, enters an interactive mode to select a model.
+    `,
+  )
+  .addOption(
+    new Option(
+      "--gpu <offload-ratio>",
+      text`
+        GPU offload ratio. Valid values: "off" (disable GPU), "max" (full offload), or a number
+        between 0 and 1 (e.g., "0.5" for 50% offload). By default, LM Studio automatically
+        determines the optimal offload ratio.
+      `,
+    ).argParser(gpuOptionParser),
+  )
+  .addOption(
+    new Option(
+      "-c, --context-length <length>",
+      text`
+        The number of tokens to consider as context when generating text. If not provided, the
+        default value will be used.
+      `,
+    ).argParser(createRefinedNumberParser({ integer: true, min: 1 })),
+  )
+  .addOption(
+    new Option(
+      "--ttl <seconds>",
+      text`
+        TTL: If provided, when the model is not used for this number of seconds, it will be unloaded.
+      `,
+    ).argParser(createRefinedNumberParser({ integer: true, min: 1 })),
+  )
+  .option(
+    "--exact",
+    text`
+      Only load the model if the path provided matches the model exactly. Fails if the path
+      provided does not match any model.
+    `,
+  )
+  .option(
+    "--identifier <identifier>",
+    text`
+      The identifier to assign to the loaded model. The identifier can be used to refer to the
+      model in the API.
+    `,
+  )
+  .option(
+    "--estimate-only",
+    text`
+      Calculate an estimate of the resources required to load the model. Does not load the model.
+    `,
+  )
+  .option(
+    "-y, --yes",
+    text`
+      Automatically approve all prompts. Useful for scripting. If there are multiple
+      models matching the path, the first one will be loaded. Fails if the path provided does not
+      match any model.
+    `,
+  );
+
+addCreateClientOptions(loadCommand);
+addLogLevelOptions(loadCommand);
+
+loadCommand.action(async (pathArg, options: LoadCommandOptions) => {
   const {
     ttl: ttlSeconds,
     gpu,
@@ -289,43 +305,36 @@ async function selectModel(
   _lastLoadedMap: Map<string, number>,
   estimateOnly: boolean = false,
 ) {
-  console.info(
-    chalk.gray("! Use the arrow keys to navigate, type to filter, and press enter to select."),
+  const pageSize = terminalSize().rows - leaveEmptyLines;
+  return await runPromptWithExitHandling(() =>
+    search<ModelInfo>(
+      {
+        message:
+          chalk.green(`Select a model to ${estimateOnly === true ? "estimate" : "load"}`) +
+          chalk.gray(" |"),
+        pageSize,
+        source: async (input: string | undefined, { signal }: { signal: AbortSignal }) => {
+          void signal;
+          const searchTerm = input ?? initialSearch;
+          const options = fuzzy.filter(searchTerm, modelPaths, {
+            pre: "\x1b[91m",
+            post: "\x1b[39m",
+          });
+          return options.map(option => {
+            const model = models[option.index];
+            const displayName =
+              option.string + " " + chalk.gray(`(${formatSizeBytes1000(model.sizeBytes)})`);
+            return {
+              value: model,
+              short: option.original,
+              name: displayName,
+            };
+          });
+        },
+      },
+      { output: process.stderr },
+    ),
   );
-  console.info();
-  const prompt = inquirer.createPromptModule({ output: process.stderr });
-  prompt.registerPrompt("autocomplete", inquirerPrompt);
-  const { selected } = await prompt({
-    type: "autocomplete",
-    name: "selected",
-    message:
-      chalk.green(`Select a model to ${estimateOnly === true ? "estimate" : "load"}`) +
-      chalk.gray(" |"),
-    initialSearch,
-    loop: false,
-    pageSize: terminalSize().rows - leaveEmptyLines,
-    emptyText: "No model matched the filter",
-    source: async (_: any, input: string) => {
-      const options = fuzzy.filter(input ?? "", modelPaths, {
-        pre: "\x1b[91m",
-        post: "\x1b[39m",
-      });
-      return options.map(option => {
-        const model = models[option.index];
-        const displayName =
-          option.string + " " + chalk.gray(`(${formatSizeBytes1000(model.sizeBytes)})`);
-        // if (lastLoadedMap.has(model.path)) {
-        //   displayName = chalk.yellow("[Recent] ") + displayName;
-        // }
-        return {
-          value: model,
-          short: option.original,
-          name: displayName,
-        };
-      });
-    },
-  } as any);
-  return selected;
 }
 
 async function loadModel(
@@ -371,11 +380,6 @@ async function loadModel(
   logger.info(text`
     To use the model in the API/SDK, use the identifier "${chalk.green(info!.identifier)}".
   `);
-  if (identifier === undefined) {
-    logger.info(text`
-      To set a custom identifier, use the ${chalk.yellow("--identifier <identifier>")} option.
-    `);
-  }
 }
 
 function printEstimatedResourceUsage(
@@ -410,3 +414,5 @@ function printEstimatedResourceUsage(
 
   logger.info("\nEstimate: " + colorFunc(message));
 }
+
+export const load = loadCommand;

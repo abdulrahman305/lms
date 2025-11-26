@@ -1,4 +1,10 @@
-import { program } from "@commander-js/extra-typings";
+import {
+  Option,
+  program,
+  type CommandUnknownOpts,
+  type HelpConfiguration,
+} from "@commander-js/extra-typings";
+import chalk from "chalk";
 import { bootstrap } from "./subcommands/bootstrap.js";
 import { chat } from "./subcommands/chat/index.js";
 import { clone } from "./subcommands/clone.js";
@@ -17,72 +23,148 @@ import { runtime } from "./subcommands/runtime/index.js";
 import { server } from "./subcommands/server.js";
 import { status } from "./subcommands/status.js";
 import { unload } from "./subcommands/unload.js";
-import { printVersion, version } from "./subcommands/version.js";
+import { getVersion, printVersionCompact, version } from "./subcommands/version.js";
 import { UserInputError } from "./types/UserInputError.js";
 
 if (process.argv.length === 2) {
-  printVersion();
+  printVersionCompact();
   console.info();
-  console.info("Usage");
 }
 
-const HELP_MESSAGE_WIDTH = 100;
-const HELP_MESSAGE_PADDING_LEFT = 4;
+const HELP_MESSAGE_PADDING_LEFT = 1;
+const HELP_MESSAGE_MAX_WIDTH = 90;
+const HELP_MESSAGE_GAP = 10;
+const commandColorByName = new Map<string, string | undefined>();
 
-const helpConfig = {
-  helpWidth: HELP_MESSAGE_WIDTH,
-  subcommandTerm: (cmd: { name(): string }) =>
-    `${cmd.name()}`.padStart(HELP_MESSAGE_PADDING_LEFT + cmd.name().length, " "),
-  subcommandDescription: (cmd: { description(): string }) => cmd.description(),
-  optionTerm: (option: { flags: string }) =>
-    `${option.flags}`.padStart(HELP_MESSAGE_PADDING_LEFT + option.flags.length, " "),
-  optionDescription: (option: { description?: string }) => option.description ?? "",
-  argumentTerm: (arg: { name(): string }) =>
-    `${arg.name()}`.padStart(HELP_MESSAGE_PADDING_LEFT + arg.name().length, " "),
-  argumentDescription: (arg: { description?: string }) => arg.description ?? "",
-};
+function formatCommandTerm(commandName: string, helpMessageGap: number): string {
+  const color = commandColorByName.get(commandName);
+  const paddedName = commandName.padEnd(commandName.length + helpMessageGap);
+  const coloredName = color === undefined ? paddedName : chalk.hex(color)(paddedName);
+  const boldName = chalk.bold(coloredName);
+  return `${" ".repeat(HELP_MESSAGE_PADDING_LEFT)}${boldName}`;
+}
 
-program.name("lms").description("LM Studio CLI");
-program.configureHelp(helpConfig);
+function addCommandsGroup(
+  title: string,
+  commands: Array<CommandUnknownOpts>,
+  colorHex?: string | null,
+): void {
+  const commandColor = colorHex ?? undefined;
+  commands.forEach(command => {
+    commandColorByName.set(command.name(), commandColor);
+  });
+  const groupTitle = chalk.bold(title);
+  program.commandsGroup(groupTitle);
+  commands.forEach(command => {
+    program.addCommand(command);
+  });
+}
 
-program.commandsGroup("Manage Models:");
-program.addCommand(get);
-program.addCommand(importCmd);
-program.addCommand(ls);
+type CommandWithOptionalParent = CommandUnknownOpts & { parent?: CommandUnknownOpts | null };
 
-program.commandsGroup("Use Models:");
-program.addCommand(chat);
-program.addCommand(load);
-program.addCommand(ps);
-program.addCommand(server);
-program.addCommand(unload);
+function getCommandPath(command: CommandUnknownOpts): string {
+  const segments: Array<string> = [];
+  let current: CommandWithOptionalParent | null | undefined = command as CommandWithOptionalParent;
+  // Walk up the tree to include the program name in usage
+  while (current !== undefined && current !== null) {
+    segments.push(current.name());
+    const parentCommand = current.parent;
+    if (parentCommand === undefined || parentCommand === null) {
+      break;
+    }
+    current = parentCommand as CommandWithOptionalParent;
+  }
+  return segments.reverse().join(" ");
+}
 
-program.commandsGroup("Develop & Publish Artifacts:");
-program.addCommand(clone);
-program.addCommand(create);
-program.addCommand(dev);
-program.addCommand(login);
-program.addCommand(push);
+function dimOptionParameters(flags: string, helpMessageGap: number): string {
+  const dimmedFlags = flags.replace(/(<[^>]+>|\[[^\]]+\])/g, match => chalk.dim(match));
+  return `${" ".repeat(HELP_MESSAGE_PADDING_LEFT)}${dimmedFlags.padEnd(
+    flags.length + helpMessageGap,
+  )}`;
+}
 
-program.commandsGroup("System Management:");
-program.addCommand(bootstrap);
-program.addCommand(daemon, { hidden: true });
-program.addCommand(flags);
-program.addCommand(log);
-program.addCommand(runtime);
-program.addCommand(status);
-program.addCommand(version);
+function createHelpConfiguration(maxWidth: number, helpMessageGap: number): HelpConfiguration {
+  return {
+    helpWidth: maxWidth,
+    commandUsage: command => chalk.bold(`${getCommandPath(command)} ${command.usage()}`),
+    subcommandTerm: (command: { name(): string }) =>
+      formatCommandTerm(command.name(), helpMessageGap),
+    subcommandDescription: (command: { description(): string }) => command.description(),
+    visibleOptions: command =>
+      command.options.filter(
+        option => option.long !== "--help" && option.short !== "-h" && option.hidden !== true,
+      ),
+    optionTerm: (option: { flags: string }) =>
+      chalk.cyan(dimOptionParameters(option.flags, helpMessageGap)),
+    optionDescription: (option: { description?: string }) => option.description ?? "",
+    argumentTerm: (argument: { name(): string }) => {
+      const argumentName = argument.name();
+      const paddedName = argumentName.padEnd(argumentName.length + helpMessageGap, " ");
+      return `${" ".repeat(HELP_MESSAGE_PADDING_LEFT)}${paddedName}`;
+    },
+    argumentDescription: (argument: { description?: string }) => argument.description ?? "",
+  };
+}
 
-program.commands.forEach(cmd => {
-  cmd.configureHelp(helpConfig);
+const rootHelpConfig = createHelpConfiguration(HELP_MESSAGE_MAX_WIDTH, HELP_MESSAGE_GAP);
+const subcommandHelpConfig = rootHelpConfig;
+
+interface HelpConfigurableCommand {
+  commands: ReadonlyArray<CommandUnknownOpts>;
+  configureHelp(helpConfiguration: HelpConfiguration): void;
+}
+
+function applyHelpConfigurationRecursively(
+  commandToConfigure: HelpConfigurableCommand,
+  commandHelpConfig: HelpConfiguration,
+  nestedHelpConfig: HelpConfiguration,
+): void {
+  commandToConfigure.configureHelp(commandHelpConfig);
+  const subcommands = commandToConfigure.commands;
+  for (const subcommand of subcommands) {
+    applyHelpConfigurationRecursively(subcommand, nestedHelpConfig, nestedHelpConfig);
+  }
+}
+
+program.name("lms");
+program.helpCommand(false);
+
+// Add a hidden global version option (-v/--version) that prints and exits without cluttering help
+program.addOption(new Option("-v, --version", "Print the version of the CLI").hideHelp());
+program.on("option:version", () => {
+  console.info(getVersion());
+  process.exit(0);
 });
+program.addHelpText(
+  "after",
+  `
+Learn more:           ${chalk.blue("https://lmstudio.ai/docs/developer")}
+Join our Discord:     ${chalk.blue("https://discord.gg/lmstudio")}`,
+);
 
-program.parseAsync(process.argv).catch((error: any) => {
+addCommandsGroup("Local models", [chat, get, load, unload, ls, ps, importCmd], "#22D3EE");
+addCommandsGroup("Serve", [server, log], "#34D399");
+addCommandsGroup("Runtime", [runtime], "#C084FC");
+addCommandsGroup("Develop & Publish (Beta)", [clone, push, dev, login], "#F9A8D4");
+
+program.addCommand(create, { hidden: true });
+program.addCommand(bootstrap, { hidden: true });
+program.addCommand(daemon, { hidden: true });
+program.addCommand(flags, { hidden: true });
+program.addCommand(status, { hidden: true });
+program.addCommand(version, { hidden: true });
+
+applyHelpConfigurationRecursively(program, rootHelpConfig, subcommandHelpConfig);
+
+program.parseAsync(process.argv).catch((error: unknown) => {
   if (error instanceof UserInputError) {
     // Omit stack trace for UserInputErrors
     console.error(error.message);
+  } else if (error instanceof Error) {
+    console.error(error.stack ?? error.message);
   } else {
-    console.error(error?.stack ?? error);
+    console.error(String(error));
   }
   process.exit(1);
 });

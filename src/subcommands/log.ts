@@ -1,37 +1,51 @@
-import { Command, Option } from "@commander-js/extra-typings";
+import { Command, Option, type OptionValues } from "@commander-js/extra-typings";
 import { text } from "@lmstudio/lms-common";
-import { type DiagnosticsLogEvent, type DiagnosticsLogEventData } from "@lmstudio/lms-shared-types";
+import {
+  type DiagnosticsLogEvent,
+  type DiagnosticsLogEventData,
+  type DiagnosticsLogRuntimeEventData,
+} from "@lmstudio/lms-shared-types";
 import chalk from "chalk";
-import { addCreateClientOptions, createClient } from "../createClient.js";
-import { addLogLevelOptions, createLogger } from "../logLevel.js";
+import { addCreateClientOptions, createClient, type CreateClientArgs } from "../createClient.js";
+import { addLogLevelOptions, createLogger, type LogLevelArgs } from "../logLevel.js";
 
-const stream = addLogLevelOptions(
-  addCreateClientOptions(
-    new Command()
-      .name("stream")
-      .description("Stream logs from LM Studio")
-      .option("--json", "Outputs in JSON format, separated by newline")
-      .option("--stats", "Print prediction stats if available")
-      .addOption(
-        new Option("-s, --source <source>", "Source of logs: 'model' or 'server'")
-          .default("model")
-          .choices(["model", "server"]),
-      )
-      .option("--filter <filter>", "Filter for model source: 'input', 'output'"),
-  ),
-).action(async options => {
+type LogStreamOptions = OptionValues &
+  CreateClientArgs &
+  LogLevelArgs & {
+    json?: boolean;
+    stats?: boolean;
+    source?: "model" | "server" | "runtime";
+    filter?: string;
+  };
+
+const stream = new Command<[], LogStreamOptions>()
+  .name("stream")
+  .description("Stream logs from LM Studio")
+  .option("--json", "Outputs in JSON format, separated by newline")
+  .option("--stats", "Print prediction stats if available")
+  .addOption(
+    new Option("-s, --source <source>", "Source of logs: 'model', 'server', or 'runtime'")
+      .default("model")
+      .choices(["model", "server", "runtime"]),
+  )
+  .option("--filter <filter>", "Filter for model source: 'input', 'output'");
+
+addCreateClientOptions(stream);
+addLogLevelOptions(stream);
+
+stream.action(async options => {
   const logger = createLogger(options);
   const client = await createClient(logger, options);
   const { json = false, stats = false, source = "model", filter } = options;
 
-  // Don't allow stats with server source
-  if (stats === true && source === "server") {
+  // Don't allow stats with non-model sources
+  if (stats === true && (source === "server" || source === "runtime")) {
     logger.error("--stats can only be used with --source model");
     process.exit(1);
   }
 
   // Validate filter usage
-  if (filter !== undefined && source === "server") {
+  if (filter !== undefined && (source === "server" || source === "runtime")) {
     logger.error("--filter can only be used with --source model");
     process.exit(1);
   }
@@ -101,12 +115,21 @@ function shouldShowLogEvent(
     return log.data.type === "server.log";
   }
 
+  if (source === "runtime") {
+    return log.data.type === "runtime.log";
+  }
+
   return true;
 }
 
 function printFormattedLog(log: DiagnosticsLogEvent, stats: boolean): void {
   if (log.data.type === "server.log") {
     console.log(log.data.content);
+    return;
+  }
+
+  if (log.data.type === "runtime.log") {
+    printRuntimeLogEvent(log.data);
     return;
   }
 
@@ -117,8 +140,16 @@ function printFormattedLog(log: DiagnosticsLogEvent, stats: boolean): void {
   console.log();
 }
 
+function printRuntimeLogEvent(data: DiagnosticsLogRuntimeEventData): void {
+  const engineDescriptor = `${data.engineName}@${data.engineVersion}`;
+  const modelDescriptor = data.modelIdentifier !== undefined ? ` ${data.modelIdentifier}` : "";
+  const pidDescriptor = data.pid !== undefined ? ` pid=${data.pid}` : "";
+  const header = `[${data.level.toUpperCase()}] ${engineDescriptor} (${data.engineType})${modelDescriptor}${pidDescriptor}`;
+  console.log(`${header} ${data.message}`);
+}
+
 function printLlmPredictionLogEvent(data: DiagnosticsLogEventData, stats: boolean) {
-  if (data.type === "server.log") return;
+  if (data.type === "server.log" || data.type === "runtime.log") return;
   console.log("modelIdentifier: " + chalk.green(data.modelIdentifier));
   if (data.type === "llm.prediction.input") {
     console.log("modelPath: " + chalk.green(data.modelPath));
@@ -142,7 +173,5 @@ function printLlmPredictionLogEvent(data: DiagnosticsLogEventData, stats: boolea
 
 export const log = new Command()
   .name("log")
-  .description(
-    "Log operations. Currently only supports streaming logs from LM Studio via `lms log stream`",
-  )
+  .description("Log incoming and outgoing messages")
   .addCommand(stream);

@@ -1,4 +1,4 @@
-import { Command, Option } from "@commander-js/extra-typings";
+import { Command, Option, type OptionValues } from "@commander-js/extra-typings";
 import { type SimpleLogger } from "@lmstudio/lms-common";
 import { terminalSize } from "@lmstudio/lms-isomorphic";
 import type { HubModel } from "@lmstudio/lms-shared-types";
@@ -6,14 +6,13 @@ import { Chat, type LLM, type LMStudioClient } from "@lmstudio/sdk";
 import chalk from "chalk";
 import columnify from "columnify";
 import fuzzy from "fuzzy";
-import inquirer from "inquirer";
-import inquirerAutocompletePrompt from "inquirer-autocomplete-prompt";
+import { confirm, search } from "@inquirer/prompts";
 import * as readline from "readline/promises";
 import { getCliPref, type CliPref } from "../../cliPref.js";
 import { askQuestion } from "../../confirm.js";
-import { addCreateClientOptions, createClient } from "../../createClient.js";
+import { addCreateClientOptions, createClient, type CreateClientArgs } from "../../createClient.js";
 import { formatSizeBytes1000 } from "../../formatSizeBytes1000.js";
-import { addLogLevelOptions, createLogger } from "../../logLevel.js";
+import { addLogLevelOptions, createLogger, type LogLevelArgs } from "../../logLevel.js";
 import { type SimpleFileData } from "../../SimpleFileData.js";
 import { createRefinedNumberParser } from "../../types/refinedNumber.js";
 import { downloadArtifact } from "../get.js";
@@ -23,6 +22,7 @@ import {
   loadModelWithProgress,
   readStdin,
 } from "./util.js";
+import { runPromptWithExitHandling } from "../../prompt.js";
 
 interface StartPredictionOpts {
   stats?: true;
@@ -30,36 +30,45 @@ interface StartPredictionOpts {
   signal?: AbortSignal;
 }
 
+type ChatCommandOptions = OptionValues &
+  CreateClientArgs &
+  LogLevelArgs & {
+    prompt?: string;
+    systemPrompt?: string;
+    stats?: true;
+    ttl: number;
+    dontFetchCatalog: boolean;
+    yes?: boolean;
+  };
+
 const DEFAULT_SYSTEM_PROMPT =
-  "You are a technical AI assistant. Answer questions clearly, concisely and to-the-point.";
+  "You are an AI assistant running in the user's terminal. Provide helpful and concise responses.";
 
 const MODEL_SELECTION_MESSAGE = "Select a model to chat with";
-const MODEL_FILTER_EMPTY_TEXT = "No model matched the filter";
 const FETCH_MODEL_CATALOG_MESSAGE =
   "Always fetch the model catalog ? (requires internet connection)";
 
 export async function getOrAskShouldFetchModelCatalog(
-  offline: boolean,
+  dontFetchCatalog: boolean,
   cliPref: SimpleFileData<CliPref>,
   logger: SimpleLogger,
 ): Promise<boolean> {
   const fetchModelCatalogPreference = cliPref.get().fetchModelCatalog;
   let shouldFetchModelCatalog = false;
-  inquirer.registerPrompt("autocomplete", inquirerAutocompletePrompt);
-  const { prompt } = inquirer;
-  if (offline !== true && fetchModelCatalogPreference !== false) {
+  if (dontFetchCatalog !== true && fetchModelCatalogPreference !== false) {
     if (fetchModelCatalogPreference === undefined) {
-      const fetchAnswer = await prompt([
-        {
-          type: "confirm",
-          name: "fetch",
-          message: FETCH_MODEL_CATALOG_MESSAGE,
-        },
-      ]);
+      const fetchAnswer = await runPromptWithExitHandling(() =>
+        confirm(
+          {
+            message: FETCH_MODEL_CATALOG_MESSAGE,
+          },
+          { output: process.stderr },
+        ),
+      );
       cliPref.setWithProducer(draft => {
-        draft.fetchModelCatalog = fetchAnswer.fetch;
+        draft.fetchModelCatalog = fetchAnswer;
       });
-      if (fetchAnswer.fetch === true) {
+      if (fetchAnswer === true) {
         logger.info("Setting the preference to always fetch the model catalog.");
         shouldFetchModelCatalog = true;
       }
@@ -73,13 +82,13 @@ export async function getOrAskShouldFetchModelCatalog(
 
 export function createModelDisplayOptions(
   modelsMap: Array<{ name: string; isDownloaded: boolean; size: number; inModelCatalog: boolean }>,
-  offline: boolean,
+  dontFetchCatalog: boolean,
 ) {
   return modelsMap.map((model, index) => {
     const status = model.isDownloaded === false ? "DOWNLOAD" : "";
     const size = formatSizeBytes1000(model.size);
 
-    const displayName = offline
+    const displayName = dontFetchCatalog
       ? `${model.name} ${chalk.gray(`(${size})`)}`
       : // uses columnify to align text in columns because we have both downloaded and local models
         // here.
@@ -247,27 +256,28 @@ export async function startInteractiveChat(
   });
 }
 
-export const chat = addLogLevelOptions(
-  addCreateClientOptions(
-    new Command()
-      .name("chat")
-      .description("Open an interactive chat with the currently loaded model.")
-      .argument("[model]", "Model name to use")
-      .option("-p, --prompt <prompt>", "Print response to stdout and quit")
-      .option("-s, --system-prompt <systemPrompt>", "Custom system prompt to use for the chat")
-      .option("--stats", "Display detailed prediction statistics after each response")
-      .addOption(
-        new Option("--ttl <ttl>", "Time (in seconds) to keep the model loaded after the chat ends")
-          .argParser(createRefinedNumberParser({ integer: true, min: 1 }))
-          .default(3600),
-      )
-      .option("--offline", "Do not fetch available models to download or updates", false)
-      .option("-y, --yes", "Assume 'yes' as answer to all CLI prompts"),
-  ),
-).action(async (model, options) => {
+const chatCommandBase = new Command<[], ChatCommandOptions>()
+  .name("chat")
+  .description("Start an interactive chat with a model")
+  .argument("[model]", "Model name to use")
+  .option("-p, --prompt <prompt>", "Print response to stdout and quit")
+  .option("-s, --system-prompt <systemPrompt>", "Custom system prompt to use for the chat")
+  .option("--stats", "Display detailed prediction statistics after each response")
+  .addOption(
+    new Option("--ttl <ttl>", "Time (in seconds) to keep the model loaded after the chat ends")
+      .argParser(createRefinedNumberParser({ integer: true, min: 1 }))
+      .default(3600),
+  )
+  .option("--dont-fetch-catalog", "Skip fetching the model catalog", false)
+  .option("-y, --yes", "Assume 'yes' as answer to all CLI prompts");
+
+const chatCommandWithClient = addCreateClientOptions(chatCommandBase);
+const chatCommand = addLogLevelOptions(chatCommandWithClient);
+
+chatCommand.action(async (model, options: ChatCommandOptions) => {
   const logger = createLogger(options);
   const client = await createClient(logger, options);
-  const { offline, yes } = options;
+  const { dontFetchCatalog, yes } = options;
 
   let providedPrompt = "";
   if (options.prompt !== undefined && options.prompt !== "") {
@@ -312,7 +322,7 @@ export const chat = addLogLevelOptions(
 
       let modelCatalogModels: HubModel[] = [];
       const shouldFetchModelCatalog = await getOrAskShouldFetchModelCatalog(
-        offline,
+        dontFetchCatalog,
         cliPref,
         logger,
       );
@@ -371,27 +381,29 @@ export const chat = addLogLevelOptions(
       ];
 
       // Pre-compute all display options to avoid recreation on each keystroke
-      const displayOptions = createModelDisplayOptions(modelsMap, offline);
+      const displayOptions = createModelDisplayOptions(modelsMap, dontFetchCatalog);
 
-      inquirer.registerPrompt("autocomplete", inquirerAutocompletePrompt);
-      const { prompt } = inquirer;
-      const answers = await prompt([
-        {
-          type: "autocomplete",
-          name: "model",
-          message: MODEL_SELECTION_MESSAGE,
-          loop: false,
-          pageSize: terminalSize().rows - 4,
-          emptyText: MODEL_FILTER_EMPTY_TEXT,
-          source: async (_answersSoFar: any, input: string | undefined) => {
-            if (input === undefined || input.length === 0) return displayOptions;
-            const options = fuzzy.filter(input, displayOptions, { extract: el => el.searchText });
-            return options.map(option => option.original);
+      const selectedModelName = await runPromptWithExitHandling(() =>
+        search<string>(
+          {
+            message: MODEL_SELECTION_MESSAGE,
+            pageSize: terminalSize().rows - 4,
+            source: async (inputValue: string | undefined, { signal }: { signal: AbortSignal }) => {
+              void signal;
+              if (inputValue === undefined || inputValue.length === 0) {
+                return displayOptions;
+              }
+              const options = fuzzy.filter(inputValue, displayOptions, {
+                extract: option => option.searchText,
+              });
+              return options.map(option => option.original);
+            },
           },
-        },
-      ]);
+          { output: process.stderr },
+        ),
+      );
 
-      const selectedModel = modelsMap.find(m => m.name === answers.model);
+      const selectedModel = modelsMap.find(modelEntry => modelEntry.name === selectedModelName);
 
       if (selectedModel === undefined) {
         logger.error("No model selected, exiting.");
@@ -414,14 +426,14 @@ export const chat = addLogLevelOptions(
       llm = await loadModelWithProgress(client, selectedModel.name, ttl, logger);
     }
   }
-  if (!providedPrompt) {
+  if (providedPrompt.length === 0) {
     logger.info(`Chatting with ${llm.identifier}.  Type 'exit', 'quit' or Ctrl+C to quit`);
   }
 
   const chat = Chat.empty();
   chat.append("system", options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT);
 
-  if (providedPrompt) {
+  if (providedPrompt.length !== 0) {
     await handleNonInteractiveChat(llm, chat, providedPrompt, logger, {
       stats: options.stats,
       ttl,
@@ -436,3 +448,5 @@ export const chat = addLogLevelOptions(
     process.exit(0);
   }
 });
+
+export const chat = chatCommand;
